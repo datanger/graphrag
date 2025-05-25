@@ -51,8 +51,9 @@ async def extract_graph(
         nonlocal num_started
         text = row[text_column]
         id = row[id_column]
+        path = row.get("path", "")
         result = await strategy_exec(
-            [Document(text=text, id=id)],
+            [Document(text=text, id=id, path=path)],
             entity_types,
             callbacks,
             cache,

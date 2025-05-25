@@ -32,6 +32,7 @@ async def load_text(
         new_item["id"] = gen_sha512_hash(new_item, new_item.keys())
         new_item["title"] = str(Path(path).name)
         new_item["creation_date"] = await storage.get_creation_date(path)
+        new_item["path"] = path
         return pd.DataFrame([new_item])
 
     return await load_files(load_file, config, storage, progress)

@@ -25,6 +25,7 @@ class Document:
 
     text: str
     id: str
+    path: str
 
 
 @dataclass

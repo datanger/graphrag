@@ -65,7 +65,7 @@ async def run_extract_graph(
             callbacks.error("Entity Extraction Error", e, s, d) if callbacks else None
         ),
     )
-    text_list = [doc.text.strip() for doc in docs]
+    text_list = [(doc.text.strip(), doc.path.strip()) for doc in docs]
 
     results = await extractor(
         list(text_list),

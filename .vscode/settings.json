@@ -38,7 +38,7 @@
     ".vscode{,/**}"
   ],
   "python.defaultInterpreterPath": "python/services/.venv/bin/python",
-  "python.languageServer": "Pylance",
+  "python.languageServer": "None",
   "cSpell.customDictionaries": {
     "project-words": {
       "name": "project-words",

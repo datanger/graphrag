@@ -3,12 +3,15 @@
 
 """A module containing 'GraphExtractionResult' and 'GraphExtractor' models."""
 
+import asyncio
+import json
 import logging
+import os
 import re
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import networkx as nx
 
@@ -23,11 +26,18 @@ from graphrag.prompts.index.extract_graph import (
 )
 
 DEFAULT_TUPLE_DELIMITER = "<|>"
-DEFAULT_RECORD_DELIMITER = "##"
-DEFAULT_COMPLETION_DELIMITER = "<|COMPLETE|>"
-DEFAULT_ENTITY_TYPES = ["organization", "person", "geo", "event"]
+DEFAULT_RECORD_DELIMITER = ">>"
+DEFAULT_COMPLETION_DELIMITER = "<<"
+DEFAULT_ENTITY_TYPES = ["organization", "person", "event", "place", "activity"]
 
 log = logging.getLogger(__name__)
+
+# Attempt to import the new MATLAB analyzer function
+try:
+    from graphrag.matlab_analyzer.ast_parser import analyze_matlab_code
+except ImportError:
+    log.warning("analyze_matlab_code could not be imported. MATLAB .m file processing will not be available.")
+    analyze_matlab_code = None
 
 
 @dataclass
@@ -88,7 +98,7 @@ class GraphExtractor:
         self._on_error = on_error or (lambda _e, _s, _d: None)
 
     async def __call__(
-        self, texts: list[str], prompt_variables: dict[str, Any] | None = None
+        self, texts: list[tuple[str, str]], prompt_variables: dict[str, Any] | None = None
     ) -> GraphExtractionResult:
         """Call method definition."""
         if prompt_variables is None:
@@ -108,24 +118,43 @@ class GraphExtractor:
             )
             or DEFAULT_COMPLETION_DELIMITER,
             self._entity_types_key: ",".join(
-                prompt_variables[self._entity_types_key] or DEFAULT_ENTITY_TYPES
+                prompt_variables.get(self._entity_types_key) or DEFAULT_ENTITY_TYPES
             ),
         }
 
-        for doc_index, text in enumerate(texts):
+        for doc_index, text_tuple in enumerate(texts):
+            text, path = text_tuple
             try:
                 # Invoke the entity extraction
-                result = await self._process_document(text, prompt_variables)
+                # 判断是否为代码文件
+                code_exts = {'.py', '.js', '.java', '.cpp', '.c', '.cs', '.ts', '.go', '.rb', '.php', '.m', '.swift', '.rs', '.kt', '.scala', '.lua', '.sh', '.pl', '.r', '.jl'}
+                _, ext = os.path.splitext(path)
+                ext_lower = ext.lower()
+
+                if ext_lower in code_exts:
+                    result = self._process_code(text, path)
+                else:
+                    result = await self._process_document(text, path, prompt_variables)
                 source_doc_map[doc_index] = text
                 all_records[doc_index] = result
             except Exception as e:
                 log.exception("error extracting graph")
+                # Determine what to pass for 'text' based on whether unpacking succeeded
+                error_context_text_content = None
+                if 'text' in locals():  # Check if 'text' was successfully unpacked
+                    error_context_text_content = text
+                elif isinstance(text_tuple, tuple) and len(text_tuple) > 0:
+                    error_context_text_content = text_tuple[0]  # Fallback to first element
+                elif text_tuple is not None:
+                    error_context_text_content = str(text_tuple) # Fallback to string representation
+
                 self._on_error(
                     e,
                     traceback.format_exc(),
                     {
                         "doc_index": doc_index,
-                        "text": text,
+                        "text_content_at_error": error_context_text_content,
+                        "input_tuple": text_tuple,
                     },
                 )
 
@@ -140,8 +169,23 @@ class GraphExtractor:
             source_docs=source_doc_map,
         )
 
+    def _process_code(self, text: str, path: str) -> str:
+        if path.lower().endswith(".m"):
+            if analyze_matlab_code is not None:
+                try:
+                    return analyze_matlab_code(text, path)
+                except Exception as e:
+                    log.error(f"Error processing MATLAB file {path} with analyze_matlab_code: {e}\n{traceback.format_exc()}")
+                    return "" 
+            else:
+                log.warning(f"Skipping MATLAB file {path} as analyze_matlab_code is not available.")
+                return ""
+        else:
+            log.info(f"No specific code processing for non-.m file type: {path}")
+            return ""
+
     async def _process_document(
-        self, text: str, prompt_variables: dict[str, str]
+        self, text: str, path: str, prompt_variables: dict[str, str]
     ) -> str:
         response = await self._model.achat(
             self._extraction_prompt.format(**{

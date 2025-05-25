@@ -39,7 +39,7 @@ async def load_csv(
 
         creation_date = await storage.get_creation_date(path)
         data["creation_date"] = data.apply(lambda _: creation_date, axis=1)
-
+        data["path"] = path
         return data
 
     return await load_files(load_file, config, storage, progress)
