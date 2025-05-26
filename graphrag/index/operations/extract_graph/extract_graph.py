@@ -52,6 +52,11 @@ async def extract_graph(
         text = row[text_column]
         id = row[id_column]
         path = row.get("path", "")
+        print("text", text)
+        print("id", id)
+        print("path", path)
+        print("document", Document(text=text, id=id, path=path))
+        raise Exception("entities")
         result = await strategy_exec(
             [Document(text=text, id=id, path=path)],
             entity_types,
@@ -76,7 +81,6 @@ async def extract_graph(
         if result:
             entity_dfs.append(pd.DataFrame(result[0]))
             relationship_dfs.append(pd.DataFrame(result[1]))
-
     entities = _merge_entities(entity_dfs)
     relationships = _merge_relationships(relationship_dfs)
 

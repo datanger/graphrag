@@ -63,6 +63,7 @@ class FilePipelineStorage(PipelineStorage):
         num_filtered = 0
         for file in all_files:
             match = file_pattern.search(f"{file}")
+            log.info("search %s for files matching %s, match result: %s", file, file_pattern.pattern, match)
             if match:
                 group = match.groupdict()
                 if item_filter(group):

@@ -4,6 +4,7 @@ import re
 import os
 import traceback
 from typing import Any, Dict, List, Tuple, Set
+from collections import defaultdict
 
 log = logging.getLogger(__name__)
 
@@ -35,9 +36,8 @@ COMMON_WORDS_TO_IGNORE = {
     "path", "content", "line", "range", "preview", "dependencies", "generates", "description",
     "type", "id", "source", "target", "label", "node", "edge", "graph", "element", "elements",
     # Words often found in comments or as contextual keywords that aren't standalone variables
-    "start", "if", "for", "while", "loop", "iter", "count", "index", "idx", "step", "endfor", "endif",
-    # Common loop iterators (often single letters)
-    "i", "j", "k", "m", "n", "x", "y", "z" # Add more if needed, but be cautious with single letters
+    "start", "if", "for", "while", "loop", "iter", "count", "index", "idx", "step", "endfor", "endif"
+    # Removed common iterators like i,j,k,x,y,z to allow them as variables
 }
 
 class MATLABASTParser:
@@ -47,8 +47,11 @@ class MATLABASTParser:
         self.lines = text.splitlines()
         self.nodes: List[Dict[str, Any]] = []
         self.edges: List[Dict[str, Any]] = []
-        self.variable_occurrences: Dict[str, List[Tuple[int, str]]] = {}
-        self.known_function_names: Set[str] = set() # Store script and function names
+        self.variable_occurrences: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+        self.function_parameters: Dict[str, List[str]] = defaultdict(list)
+        self.known_function_names: Set[str] = set()  # Store script and function names
+        self.variable_dependencies: Dict[str, Set[str]] = defaultdict(set)
+        self.script_level_vars: Set[str] = set()
 
     def _find_line_range(self, content_snippet: str) -> str:
         """Finds the line range of a snippet within the full text."""
@@ -62,27 +65,70 @@ class MATLABASTParser:
             return "unknown"
 
     def _is_valid_variable(self, var_name: str) -> bool:
-        if not var_name or not var_name[0].isalpha() and var_name[0] != '_':
-            return False # Must start with a letter or underscore
+        if not var_name or not (var_name[0].isalpha() or var_name[0] == '_'):
+            return False  # Must start with a letter or underscore
         if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", var_name):
-            return False # Invalid characters
+            return False  # Invalid characters
         if var_name in MATLAB_KEYWORDS or var_name in MATLAB_BUILTINS or var_name.lower() in COMMON_WORDS_TO_IGNORE:
             return False
-        if var_name in self.known_function_names: # Check against known script/function names
+        if var_name in self.known_function_names:  # Check against known script/function names
             return False
-        # Filter out multi-level names like 's.field', keep only 's'
-        # Also filter out function calls like 'myFunc(arg)' being mistaken for variables.
+        # Filter out multi-level names and function calls
         if '.' in var_name or '(' in var_name or ')' in var_name:
             return False
         return True
 
     def _extract_variables_from_line(self, line_content: str, line_num: int):
-        # Regex to find potential variable assignments (LHS) and usages (RHS)
-        potential_vars = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line_content)
+        # Remove string literals first to avoid matching words inside them
+        line_no_strings = re.sub(r"'.*?'", "''", line_content)  # Replace string literals with empty strings
+        line_no_comments = line_no_strings.split('%')[0].strip()
         
-        line_no_comments = line_content.split('%')[0].strip()
         if not line_no_comments:
             return
+
+        # --- Dependency Extraction from Assignments ---
+        # Single LHS: var = ...
+        assignment_match_single = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*)", line_no_comments)
+        # Multiple LHS: [var1, var2] = ...
+        assignment_match_multi = re.match(r"^\s*\[\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)\s*\]\s*=\s*(.*)", line_no_comments)
+
+        lhs_vars_on_line = []
+        rhs_expression_str = ""
+
+        if assignment_match_single:
+            lhs_var = assignment_match_single.group(1)
+            if self._is_valid_variable(lhs_var): # Check if LHS is a valid var name
+                lhs_vars_on_line.append(lhs_var)
+            rhs_expression_str = assignment_match_single.group(2)
+        elif assignment_match_multi:
+            lhs_vars_str = assignment_match_multi.group(1)
+            temp_lhs_list = [v.strip() for v in lhs_vars_str.split(',')]
+            for v_lhs in temp_lhs_list:
+                if self._is_valid_variable(v_lhs):
+                    lhs_vars_on_line.append(v_lhs)
+            rhs_expression_str = assignment_match_multi.group(2)
+        
+        if rhs_expression_str and lhs_vars_on_line:
+            # Extract potential variables from RHS
+            potential_rhs_vars = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', rhs_expression_str)
+            actual_rhs_vars = set()
+            for p_rhs_var in potential_rhs_vars:
+                if self._is_valid_variable(p_rhs_var) and p_rhs_var not in lhs_vars_on_line: # Avoid self-dependency like a=a+1 here
+                    actual_rhs_vars.add(p_rhs_var)
+            
+            for lhs_v in lhs_vars_on_line:
+                self.variable_dependencies[lhs_v].update(actual_rhs_vars)
+        # --- End Dependency Extraction ---
+
+        # Find all potential variables (words that could be variables) for occurrence tracking
+        potential_vars = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line_no_comments)
+        
+        # Find all function calls (words followed by '(' that aren't keywords)
+        function_calls = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', line_no_comments)
+        for func in function_calls:
+            if func not in self.known_function_names and func not in MATLAB_BUILTINS and func not in MATLAB_KEYWORDS:
+                # Add function calls to known functions to prevent them from being treated as variables
+                self.known_function_names.add(func)
 
         for var_name in potential_vars:
             if self._is_valid_variable(var_name):
@@ -93,14 +139,30 @@ class MATLABASTParser:
     def parse(self):
         script_name = os.path.splitext(os.path.basename(self.path))[0]
         self.known_function_names.add(script_name) # Add script name to prevent it being a var
+
+        # Pass 1: Pre-scan for all function definitions to populate known_function_names
+        # This helps _is_valid_variable correctly identify function calls on RHS of assignments
+        for line_content_pass1 in self.lines:
+            stripped_line_pass1 = line_content_pass1.strip()
+            # Regex to capture function name: function [outputs] = funcName(inputs)
+            func_match_pass1 = re.match(r"^\s*function(?:\s+\[?([\w\s,]+)\]?)?\s*=\s*(\w+)\s*\(([^)]*)\)", stripped_line_pass1)
+            if func_match_pass1:
+                # group(2) is the function name based on the regex structure
+                _, func_name_from_match_pass1, _ = func_match_pass1.groups()
+                if func_name_from_match_pass1:
+                     self.known_function_names.add(func_name_from_match_pass1)
         
         script_node_name = f"SCRIPT_{script_name.upper()}"
+        script_line_range = f"1-{len(self.lines)}"
+        script_content_preview = "\n".join(self.lines[:20])
         script_description = {
             "script_name": script_name,
             "file_path": self.path,
-            "line_range": f"1-{len(self.lines)}",
-            "content_preview": "\n".join(self.lines[:20]),
-            "dependencies": [], 
+            "occurrences": [{
+                "line_range": script_line_range,
+                "content": script_content_preview
+            }],
+            "dependencies": [], # Script node itself doesn't have dependencies in this context
             "generates": [] 
         }
         self.nodes.append({
@@ -109,9 +171,11 @@ class MATLABASTParser:
             "description": json.dumps(script_description)
         })
 
+        # Pass 2: Extract variables and dependencies now that all function names are known
         for i, line in enumerate(self.lines):
             self._extract_variables_from_line(line, i + 1)
 
+        # Pass 3: Function structure parsing, node/edge creation for functions
         current_function_name = None
         current_function_content: List[str] = []
         current_function_start_line = -1
@@ -128,11 +192,15 @@ class MATLABASTParser:
             func_match = re.match(r"^\s*function(?:\s+\[?([\w\s,]+)\]?)?\s*=\s*(\w+)\s*\(([^)]*)\)", stripped_line)
             if func_match:
                 if current_function_name: 
+                    func_line_range = f"{current_function_start_line}-{line_num-1}"
+                    func_content = "\n".join(current_function_content)
                     func_desc = {
                         "function_name": current_function_name,
                         "file_path": self.path,
-                        "line_range": f"{current_function_start_line}-{line_num-1}",
-                        "content": "\n".join(current_function_content),
+                        "occurrences": [{
+                            "line_range": func_line_range,
+                            "content": func_content
+                        }],
                         "parameters": current_func_params_str, 
                         "outputs": current_func_outputs_str 
                     }
@@ -155,16 +223,42 @@ class MATLABASTParser:
                 self.known_function_names.add(current_function_name) # Add to known function names
                 current_func_outputs_str = outputs.strip() if outputs else ""
                 current_func_params_str = params.strip() if params else ""
+                
+                # Register function parameters
+                if current_func_params_str:
+                    params_list = [p.strip() for p in current_func_params_str.split(',') if p.strip()]
+                    self.function_parameters[current_function_name] = params_list
+                    
+                    for param in params_list:
+                        # Add edge from function to parameter
+                        param_id = f"VARIABLE_{param.upper()}"
+                        self.edges.append({
+                            "source": f"FUNCTION_{current_function_name.upper()}",
+                            "target": param_id,
+                            "label": "has_parameter",
+                            "weight": 1.0
+                        })
+                        
+                        # Initialize variable occurrence if not exists
+                        if param not in self.variable_occurrences:
+                            self.variable_occurrences[param] = []
+                        # Add the parameter declaration as an occurrence
+                        self.variable_occurrences[param].append((line_num, f"function {current_function_name} parameter: {param}"))
+                
                 current_function_content = [line_content]
                 current_function_start_line = line_num
             elif current_function_name:
                 current_function_content.append(line_content)
                 if re.match(r"^\s*end\s*(?:%.*)?$", stripped_line):
+                    func_line_range = f"{current_function_start_line}-{line_num}"
+                    func_content = "\n".join(current_function_content)
                     func_desc = {
                         "function_name": current_function_name,
                         "file_path": self.path,
-                        "line_range": f"{current_function_start_line}-{line_num}",
-                        "content": "\n".join(current_function_content),
+                        "occurrences": [{
+                            "line_range": func_line_range,
+                            "content": func_content
+                        }],
                         "parameters": current_func_params_str,
                         "outputs": current_func_outputs_str
                     }
@@ -182,12 +276,16 @@ class MATLABASTParser:
                     current_function_content = []
                     current_function_start_line = -1
         
-        if current_function_name:
+        if current_function_name: # Process the last function if file ends mid-function
+            func_line_range = f"{current_function_start_line}-{len(self.lines)}"
+            func_content = "\n".join(current_function_content)
             func_desc = {
                 "function_name": current_function_name,
                 "file_path": self.path,
-                "line_range": f"{current_function_start_line}-{len(self.lines)}",
-                "content": "\n".join(current_function_content),
+                "occurrences": [{
+                    "line_range": func_line_range,
+                    "content": func_content
+                }],
                 "parameters": current_func_params_str,
                 "outputs": current_func_outputs_str
             }
@@ -202,14 +300,29 @@ class MATLABASTParser:
                 "outputs": current_func_outputs_str.split(',') if current_func_outputs_str else []
             })
 
+        # Determine script-level variables for 'declares_variable' edge
+        for var_name_scope, occurrences_list_scope in self.variable_occurrences.items():
+            is_script_level_var = False
+            for occ_line_num, _ in occurrences_list_scope:
+                is_in_any_function = False
+                for func_info_scope in parsed_functions:
+                    if func_info_scope["start_line"] <= occ_line_num <= func_info_scope["end_line"]:
+                        is_in_any_function = True
+                        break
+                if not is_in_any_function:
+                    is_script_level_var = True
+                    break
+            if is_script_level_var:
+                self.script_level_vars.add(var_name_scope)
+
         # Create variable nodes and script->variable edges
-        for var_name, occurrences in self.variable_occurrences.items():
-            if not occurrences: continue
+        for var_name, occurrences_list in self.variable_occurrences.items():
+            if not occurrences_list: continue
             var_desc = {
                 "variable_name": var_name,
                 "file_path": self.path,
-                "occurrences": [(f"L{loc[0]}", loc[1]) for loc in occurrences],
-                "dependencies": [] 
+                "occurrences": [{"line_range": f"L{loc[0]}", "content": loc[1]} for loc in occurrences_list],
+                "dependencies": sorted(list(self.variable_dependencies.get(var_name, set())))
             }
             var_node_name = f"VARIABLE_{var_name.upper()}"
             self.nodes.append({
@@ -218,7 +331,8 @@ class MATLABASTParser:
                 "description": json.dumps(var_desc)
             })
             # Rudimentary edge: variable used in script (general existence)
-            self.edges.append({"source": script_node_name, "target": var_node_name, "label": "declares_variable", "weight": 1.0})
+            if var_name in self.script_level_vars: # Only add if it's a script-level variable
+                self.edges.append({"source": script_node_name, "target": var_node_name, "label": "declares_variable", "weight": 1.0})
 
         # Create function->variable edges
         for func_info in parsed_functions:
@@ -240,7 +354,14 @@ class MATLABASTParser:
                     else: # Create if somehow missed (e.g. only in signature)
                         # Only add if it's not a function name itself (edge case)
                         if param_name not in self.known_function_names:
-                            var_desc_simple = {"variable_name": param_name, "file_path": self.path, "occurrences": [(f"L{func_start}", "parameter declaration")]}
+                            var_desc_simple = {
+                                "variable_name": param_name, 
+                                "file_path": self.path, 
+                                "occurrences": [{
+                                    "line_range": f"L{func_start}", 
+                                    "content": "parameter declaration"
+                                }]
+                            }
                             self.nodes.append({"id": var_node_name, "type": "variable", "description": json.dumps(var_desc_simple)})
                             self.edges.append({"source": func_node_id, "target": var_node_name, "label": "uses_parameter", "weight": 1.0})
 
@@ -252,7 +373,14 @@ class MATLABASTParser:
                         self.edges.append({"source": func_node_id, "target": var_node_name, "label": "assigns_output", "weight": 1.0})
                     else: # Create if somehow missed
                         if output_name not in self.known_function_names:
-                            var_desc_simple = {"variable_name": output_name, "file_path": self.path, "occurrences": [(f"L{func_start}", "output declaration")]}
+                            var_desc_simple = {
+                                "variable_name": output_name, 
+                                "file_path": self.path, 
+                                "occurrences": [{
+                                    "line_range": f"L{func_start}", 
+                                    "content": "output declaration"
+                                }]
+                            }
                             self.nodes.append({"id": var_node_name, "type": "variable", "description": json.dumps(var_desc_simple)})
                             self.edges.append({"source": func_node_id, "target": var_node_name, "label": "assigns_output", "weight": 1.0})
 

@@ -130,7 +130,6 @@ class GraphExtractor:
                 code_exts = {'.py', '.js', '.java', '.cpp', '.c', '.cs', '.ts', '.go', '.rb', '.php', '.m', '.swift', '.rs', '.kt', '.scala', '.lua', '.sh', '.pl', '.r', '.jl'}
                 _, ext = os.path.splitext(path)
                 ext_lower = ext.lower()
-
                 if ext_lower in code_exts:
                     result = self._process_code(text, path)
                 else:
