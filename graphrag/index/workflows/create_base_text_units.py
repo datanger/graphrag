@@ -4,7 +4,7 @@
 """A module containing run_workflow method definition."""
 
 import json
-from typing import Any, cast
+from typing import Any, Callable, Union, cast
 
 import pandas as pd
 
@@ -66,9 +66,13 @@ def create_base_text_units(
 
     callbacks.progress(Progress(percent=0))
 
-    agg_dict = {"text_with_ids": list}
+    # Type hint for agg_dict to support pandas aggregation functions (callables or strings)
+    agg_dict: dict[str, Union[Callable, str]] = {"text_with_ids": list}
+
     if "metadata" in documents:
-        agg_dict["metadata"] = "first"  # type: ignore
+        agg_dict["metadata"] = "first"
+    if "path" in documents:
+        agg_dict["path"] = "first"
 
     aggregated = (
         (
@@ -127,7 +131,14 @@ def create_base_text_units(
 
     aggregated = aggregated.apply(lambda row: chunker(row), axis=1)
 
-    aggregated = cast("pd.DataFrame", aggregated[[*group_by_columns, "chunks"]])
+    # Ensure 'path' is included if it exists in group_by_columns or was added via agg_dict
+    final_columns = [*group_by_columns, "chunks"]
+    if "path" in aggregated.columns:
+        final_columns.append("path")
+    # Remove duplicates in case 'path' was already in group_by_columns
+    final_columns = list(dict.fromkeys(final_columns).keys())
+
+    aggregated = cast("pd.DataFrame", aggregated[final_columns])
     aggregated = aggregated.explode("chunks")
     aggregated.rename(
         columns={

@@ -3,7 +3,7 @@ import logging
 import re
 import os
 import traceback
-from typing import Any, Dict, List, Tuple, Set
+from typing import Any, Dict, List, Tuple, Set, Optional, Union
 from collections import defaultdict
 
 log = logging.getLogger(__name__)
@@ -16,29 +16,27 @@ DEFAULT_RECORD_DELIMITER = ">>"
 MATLAB_KEYWORDS = {
     "if", "else", "elseif", "end", "for", "while", "switch", "case", "otherwise",
     "try", "catch", "function", "return", "global", "persistent", "classdef",
-    "properties", "methods", "events", "parfor", "spmd"
+    "properties", "methods", "events", "parfor", "spmd", "is"
 }
-MATLAB_BUILTINS = {
-    "disp", "plot", "figure", "zeros", "ones", "eye", "rand", "randn", "size", "length",
-    "xlabel", "ylabel", "title", "legend", "hold", "grid", "subplot", "imread", "imwrite",
-    "fopen", "fclose", "fprintf", "fscanf", "textscan", "input", "error", "warning",
-    "clear", "clc", "whos", "save", "load", "exist", "nargin", "nargout", "varargin", "varargout",
-    "sum", "mean", "std", "min", "max", "abs", "sqrt", "exp", "log", "log10", "sin", "cos", "tan",
-    "asin", "acos", "atan", "atan2", "round", "floor", "ceil", "fix", "mod", "rem"
-}
+
+with open("graphrag/matlab_analyzer/matlab_builtin_functions.json", "r") as f:
+    MATLAB_BUILTINS = json.load(f)
 
 # Common English words that might be picked up by regex but are not usually variables
 COMMON_WORDS_TO_IGNORE = {
-    "assign", "assigns", "define", "defines", "use", "uses", "variable", "variables", 
+    "on", "off", "assign", "assigns", "define", "defines", "use", "uses", "variable", "variables", 
     "parameter", "parameters", "input", "inputs", "output", "outputs", "script", 
     # "function", # function is a keyword, already handled by MATLAB_KEYWORDS
-    "local", "global", "calculation", "value", "result", "test", "file",
+    "local", "global", "calculation", "value", "test", "file",
     "path", "content", "line", "range", "preview", "dependencies", "generates", "description",
     "type", "id", "source", "target", "label", "node", "edge", "graph", "element", "elements",
     # Words often found in comments or as contextual keywords that aren't standalone variables
-    "start", "if", "for", "while", "loop", "iter", "count", "index", "idx", "step", "endfor", "endif"
-    # Removed common iterators like i,j,k,x,y,z to allow them as variables
+    "start", "if", "for", "while", "loop", "iter", "count", "index", "idx", "step", "endfor", "endif", "is",
+    # common iterators variables like i,j,k,x,y,z
+    "i", "j", "k", "x", "y", "z"
 }
+
+IDENTIFIERS_TO_EXCLUDE = set(MATLAB_KEYWORDS).union(set(MATLAB_BUILTINS)).union(COMMON_WORDS_TO_IGNORE)
 
 class MATLABASTParser:
     def __init__(self, text: str, path: str):
@@ -65,18 +63,41 @@ class MATLABASTParser:
             return "unknown"
 
     def _is_valid_variable(self, var_name: str) -> bool:
-        if not var_name or not (var_name[0].isalpha() or var_name[0] == '_'):
-            return False  # Must start with a letter or underscore
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", var_name):
-            return False  # Invalid characters
-        if var_name in MATLAB_KEYWORDS or var_name in MATLAB_BUILTINS or var_name.lower() in COMMON_WORDS_TO_IGNORE:
+        """Check if a variable name is valid (not a keyword, builtin, etc.)"""
+        if not var_name:
             return False
-        if var_name in self.known_function_names:  # Check against known script/function names
+            
+        # Check if it's a known function name
+        if var_name in self.known_function_names or var_name in IDENTIFIERS_TO_EXCLUDE:
             return False
-        # Filter out multi-level names and function calls
-        if '.' in var_name or '(' in var_name or ')' in var_name:
+            
+        # Check for invalid characters
+        if any(c.isspace() for c in var_name) or any(c in '()[]{}' for c in var_name):
             return False
+            
+        # Must start with a letter
+        if not var_name[0].isalpha():
+            return False
+            
         return True
+        
+    def _should_keep_variable(self, var_name: str) -> bool:
+        """
+        Determine if a variable should be kept based on filtering criteria:
+        1. Keep if contains underscore
+        2. Keep if contains uppercase letters
+        3. Otherwise, keep if length >= 5
+        """
+        # Rule 1: Keep if contains underscore
+        if '_' in var_name:
+            return True
+            
+        # Rule 2: Keep if contains uppercase letters
+        if any(c.isupper() for c in var_name):
+            return True
+            
+        # Rule 3: Keep if length >= 5
+        return len(var_name) >= 5
 
     def _extract_variables_from_line(self, line_content: str, line_num: int):
         # Remove string literals first to avoid matching words inside them
@@ -109,8 +130,8 @@ class MATLABASTParser:
             rhs_expression_str = assignment_match_multi.group(2)
         
         if rhs_expression_str and lhs_vars_on_line:
-            # Extract potential variables from RHS
-            potential_rhs_vars = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', rhs_expression_str)
+            # Extract potential variables from RHS, excluding those preceded by a dot
+            potential_rhs_vars = re.findall(r'(?<!\.)\b([a-zA-Z_][a-zA-Z0-9_]*)\b', rhs_expression_str)
             actual_rhs_vars = set()
             for p_rhs_var in potential_rhs_vars:
                 if self._is_valid_variable(p_rhs_var) and p_rhs_var not in lhs_vars_on_line: # Avoid self-dependency like a=a+1 here
@@ -121,7 +142,8 @@ class MATLABASTParser:
         # --- End Dependency Extraction ---
 
         # Find all potential variables (words that could be variables) for occurrence tracking
-        potential_vars = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line_no_comments)
+        # Exclude those preceded by a dot to avoid field names in struct.field
+        potential_vars = re.findall(r'(?<!\.)\b([a-zA-Z_][a-zA-Z0-9_]*)\b', line_no_comments)
         
         # Find all function calls (words followed by '(' that aren't keywords)
         function_calls = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(', line_no_comments)
@@ -130,11 +152,16 @@ class MATLABASTParser:
                 # Add function calls to known functions to prevent them from being treated as variables
                 self.known_function_names.add(func)
 
+        # Track seen line numbers for each variable to avoid duplicates
+        seen_vars = set()
         for var_name in potential_vars:
-            if self._is_valid_variable(var_name):
+            if self._is_valid_variable(var_name) and var_name not in seen_vars:
+                seen_vars.add(var_name)
                 if var_name not in self.variable_occurrences:
                     self.variable_occurrences[var_name] = []
-                self.variable_occurrences[var_name].append((line_num, line_no_comments))
+                # Only add if this line number isn't already recorded for this variable
+                if not any(occ[0] == line_num for occ in self.variable_occurrences[var_name]):
+                    self.variable_occurrences[var_name].append((line_num, line_no_comments))
 
     def parse(self):
         script_name = os.path.splitext(os.path.basename(self.path))[0]
@@ -152,9 +179,13 @@ class MATLABASTParser:
                 if func_name_from_match_pass1:
                      self.known_function_names.add(func_name_from_match_pass1)
         
+        # Initialize parsed_functions at the start
+        parsed_functions: List[Dict[str, Any]] = []
+        
         script_node_name = f"SCRIPT_{script_name.upper()}"
         script_line_range = f"1-{len(self.lines)}"
         script_content_preview = "\n".join(self.lines[:20])
+        # Prepare script description with placeholder for outputs
         script_description = {
             "script_name": script_name,
             "file_path": self.path,
@@ -162,8 +193,8 @@ class MATLABASTParser:
                 "line_range": script_line_range,
                 "content": script_content_preview
             }],
-            "dependencies": [], # Script node itself doesn't have dependencies in this context
-            "generates": [] 
+            "inputs": [], # Script node itself doesn't have dependencies in this context
+            "outputs": [] # Will be populated with script-level variables later
         }
         self.nodes.append({
             "id": script_node_name,
@@ -181,9 +212,6 @@ class MATLABASTParser:
         current_function_start_line = -1
         current_func_params_str = ""
         current_func_outputs_str = ""
-        
-        # Store function details to process variable links later
-        parsed_functions: List[Dict[str, Any]] = []
 
         for i, line_content in enumerate(self.lines):
             line_num = i + 1
@@ -192,32 +220,30 @@ class MATLABASTParser:
             func_match = re.match(r"^\s*function(?:\s+\[?([\w\s,]+)\]?)?\s*=\s*(\w+)\s*\(([^)]*)\)", stripped_line)
             if func_match:
                 if current_function_name: 
-                    func_line_range = f"{current_function_start_line}-{line_num-1}"
-                    func_content = "\n".join(current_function_content)
-                    func_desc = {
-                        "function_name": current_function_name,
-                        "file_path": self.path,
-                        "occurrences": [{
-                            "line_range": func_line_range,
-                            "content": func_content
-                        }],
-                        "parameters": current_func_params_str, 
-                        "outputs": current_func_outputs_str 
-                    }
-                    self.nodes.append({"id": f"FUNCTION_{current_function_name.upper()}", "type": "function", "description": json.dumps(func_desc)})
-                    self.edges.append({"source": script_node_name, "target": f"FUNCTION_{current_function_name.upper()}", "label": "defines_function"})
-                    parsed_functions.append({
-                        "name": current_function_name,
+                    func_node = {
                         "id": f"FUNCTION_{current_function_name.upper()}",
-                        "start_line": current_function_start_line,
-                        "end_line": line_num,
-                        "params": current_func_params_str.split(',') if current_func_params_str else [],
-                        "outputs": current_func_outputs_str.split(',') if current_func_outputs_str else []
+                        "type": "function",
+                        "description": json.dumps({
+                            "function_name": current_function_name,
+                            "file_path": self.path,
+                            "occurrences": [{
+                                "line_range": f"{current_function_start_line}-{line_num}",
+                                "content": "\n".join(current_function_content[:20])  # First 20 lines as preview
+                            }],
+                            "parameters": [p.strip() for p in current_func_params_str.split(',') if p.strip()],
+                            "outputs": [o.strip() for o in current_func_outputs_str.split(',') if o.strip()]
+                        })
+                    }
+                    self.nodes.append(func_node)
+                    
+                    # Store function scope information
+                    parsed_functions.append({
+                        'name': current_function_name,
+                        'start_line': current_function_start_line,
+                        'end_line': line_num
                     })
-                    current_function_name = None 
-                    current_function_content = []
-                    current_function_start_line = -1
-        
+                    self.edges.append({"source": script_node_name, "target": f"FUNCTION_{current_function_name.upper()}", "label": "defines_function"})
+
                 outputs, func_name_from_match, params = func_match.groups()
                 current_function_name = func_name_from_match 
                 self.known_function_names.add(current_function_name) # Add to known function names
@@ -230,11 +256,10 @@ class MATLABASTParser:
                     self.function_parameters[current_function_name] = params_list
                     
                     for param in params_list:
-                        # Add edge from function to parameter
-                        param_id = f"VARIABLE_{param.upper()}"
+                        # After processing all functions, add edges for variable dependencies
                         self.edges.append({
                             "source": f"FUNCTION_{current_function_name.upper()}",
-                            "target": param_id,
+                            "target": f"VARIABLE_{param.upper()}",
                             "label": "has_parameter",
                             "weight": 1.0
                         })
@@ -259,7 +284,7 @@ class MATLABASTParser:
                             "line_range": func_line_range,
                             "content": func_content
                         }],
-                        "parameters": current_func_params_str,
+                        "inputs": current_func_params_str,
                         "outputs": current_func_outputs_str
                     }
                     self.nodes.append({"id": f"FUNCTION_{current_function_name.upper()}", "type": "function", "description": json.dumps(func_desc)})
@@ -286,7 +311,7 @@ class MATLABASTParser:
                     "line_range": func_line_range,
                     "content": func_content
                 }],
-                "parameters": current_func_params_str,
+                "inputs": current_func_params_str,
                 "outputs": current_func_outputs_str
             }
             self.nodes.append({"id": f"FUNCTION_{current_function_name.upper()}", "type": "function", "description": json.dumps(func_desc)})
@@ -300,20 +325,42 @@ class MATLABASTParser:
                 "outputs": current_func_outputs_str.split(',') if current_func_outputs_str else []
             })
 
-        # Determine script-level variables for 'declares_variable' edge
-        for var_name_scope, occurrences_list_scope in self.variable_occurrences.items():
+        # Determine script-level and function-level variables
+        script_level_vars_info = []
+        function_vars_map = {func_info['id']: [] for func_info in parsed_functions}
+        
+        for var_name, occurrences_list in self.variable_occurrences.items():
+            if not occurrences_list:
+                continue
+                
+            var_info = {
+                "variable_name": var_name,
+                "occurrences": [{"line_range": f"L{loc[0]}", "content": loc[1]} for loc in occurrences_list],
+                "dependencies": sorted(list(self.variable_dependencies.get(var_name, set())))
+            }
+            
+            # Determine if this is a script-level variable or belongs to a function
             is_script_level_var = False
-            for occ_line_num, _ in occurrences_list_scope:
+            function_occurrences = {}
+            
+            for occ_line_num, _ in occurrences_list:
                 is_in_any_function = False
-                for func_info_scope in parsed_functions:
-                    if func_info_scope["start_line"] <= occ_line_num <= func_info_scope["end_line"]:
+                for func_info in parsed_functions:
+                    if func_info["start_line"] <= occ_line_num <= func_info["end_line"]:
                         is_in_any_function = True
+                        # Add to function's variables
+                        function_occurrences.setdefault(func_info["id"], []).append(occ_line_num)
                         break
                 if not is_in_any_function:
                     is_script_level_var = True
-                    break
+            
             if is_script_level_var:
-                self.script_level_vars.add(var_name_scope)
+                self.script_level_vars.add(var_name)
+                script_level_vars_info.append(var_info)
+                
+            # Add to each function where the variable appears
+            for func_id, _ in function_occurrences.items():
+                function_vars_map[func_id].append(var_info)
 
         # Create variable nodes and script->variable edges
         for var_name, occurrences_list in self.variable_occurrences.items():
@@ -333,6 +380,15 @@ class MATLABASTParser:
             # Rudimentary edge: variable used in script (general existence)
             if var_name in self.script_level_vars: # Only add if it's a script-level variable
                 self.edges.append({"source": script_node_name, "target": var_node_name, "label": "declares_variable", "weight": 1.0})
+                
+        # Update script node with script-level variables as outputs
+        if self.script_level_vars:
+            for node in self.nodes:
+                if node["id"] == script_node_name:
+                    script_desc = json.loads(node["description"])
+                    script_desc["outputs"] = list(self.script_level_vars)
+                    node["description"] = json.dumps(script_desc)
+                    break
 
         # Create function->variable edges
         for func_info in parsed_functions:
@@ -399,6 +455,63 @@ class MATLABASTParser:
                             if not any(e['source'] == func_node_id and e['target'] == var_node_name and e['label'] == "uses_variable" for e in self.edges):
                                 self.edges.append({"source": func_node_id, "target": var_node_name, "label": "uses_variable", "weight": 1.0})
                             break # Found an occurrence in this function, no need to check other occurrences for this var-func pair
+        
+        # Apply filtering to remove less important variables
+        self._filter_nodes_and_edges()
+
+    def _filter_nodes_and_edges(self):
+        """Filter nodes and edges based on variable importance criteria"""
+        # Track which variable nodes to keep
+        variables_to_keep = set()
+        
+        # First pass: identify which variable nodes to keep
+        for node in self.nodes[:]:  # Make a copy for iteration
+            if node["type"] == "variable":
+                var_name = json.loads(node["description"])["variable_name"]
+                if self._should_keep_variable(var_name):
+                    variables_to_keep.add(node["id"])
+        
+        # Always keep script and function nodes
+        nodes_to_keep = [
+            node for node in self.nodes 
+            if node["type"] in ["script", "function"] or node["id"] in variables_to_keep
+        ]
+        
+        # Filter edges to only include those where both source and target are in the kept nodes
+        node_ids = {node["id"] for node in nodes_to_keep}
+        edges_to_keep = [
+            edge for edge in self.edges
+            if edge["source"] in node_ids and edge["target"] in node_ids
+        ]
+        
+        # Update nodes and edges
+        self.nodes = nodes_to_keep
+        self.edges = edges_to_keep
+        
+        # Update script_level_vars to only include kept variables
+        self.script_level_vars = {
+            var for var in self.script_level_vars 
+            if self._should_keep_variable(var)
+        }
+        
+        # Update variable_occurrences to only include kept variables
+        self.variable_occurrences = {
+            var: occ for var, occ in self.variable_occurrences.items()
+            if self._should_keep_variable(var)
+        }
+        
+        # Update variable_dependencies to only include kept variables
+        self.variable_dependencies = {
+            var: {dep for dep in deps if self._should_keep_variable(dep)}
+            for var, deps in self.variable_dependencies.items()
+            if self._should_keep_variable(var)
+        }
+        
+        # Remove empty dependencies
+        self.variable_dependencies = {
+            var: deps for var, deps in self.variable_dependencies.items()
+            if deps
+        }
 
     def format_output(self) -> str:
         output_parts = []
@@ -487,37 +600,78 @@ def _parse_output_to_graph_elements(output_string: str) -> Tuple[List[Dict[str, 
 
 if __name__ == '__main__':
     dummy_m_content = """
-    % This is a test script
-    a = 10; % assign a
-    b = a + 5; % assign b
-    disp(b); % uses b
+    function plot_ARratio(solution)
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % Copyright (C) 2020-2025, by Kai Chen, All rights reserved.
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    nsol=size(solution,1);
+    if nsol==0
+        error('Solution is empty!!!\n');
+    end
 
-    function y = myFunction(x) % defines myFunction
-        % This is a test function
-        y = x * 2; % calculation, uses x, assigns y
-        disp(y); % uses y
-        c = 30; % local variable, assigns c
-        if y > 10 % start if, uses y
-            disp('Big Y');
-        end % end if
-    end % end function myFunction
+    ratio=zeros(nsol,1); stat=zeros(nsol,1); time=zeros(nsol,1); j=0;
+    for i=1:nsol
+        if dot(solution(i).pos,solution(i).pos)<=0
+            continue;
+        end
+        [~,sow]=time2gpst(solution(i).time);
+        time(j+1)=sow;
+        ratio(j+1,:)=solution(i).ratio;
+        stat(j+1,:)=solution(i).stat;
+        j=j+1; 
+    end
 
-    function [out1, out2] = anotherFunc(in1, in2, in3) % defines anotherFunc
-        % This is another function
-        out1 = in1 + in2; % uses in1, in2, assigns out1
-        out2 = in3 * 5; % uses in3, assigns out2
-        if out1 > 10 % start if, uses out1
-            for k = 1:out1 % start for, uses out1, assigns k
-                out2 += k; % uses k
-            end % end for
-        end % end if
-    end % end function anotherFunc
+    if j==0
+        error('Solution is empty!!!\n');
+    end
 
-    myFunction(b); % call function, uses b, myFunction
-    anotherFunc(1,2,3); % call function, uses anotherFunc
-    d = 40; % assigns d
-    % Test script level end
-    % end 
+    if j<nsol
+        time(j+1:end,:)=[];
+        ratio(j+1:end,:)=[];
+        stat(j+1:end,:)=[];
+    end
+
+    nt=size(time,1); k=0; tt=zeros(nt,1);
+    if nt==1
+        n_all=1;
+    else
+        tspan=time(end)-time(1);
+        for i=1:nt
+            if i==nt
+                break;
+            end
+            tt(k+1,1)=time(i+1)-time(i);
+            k=k+1;
+        end
+        tt(end,:)=[];
+        dt=mode(tt);
+        n_all=tspan/dt+1;
+    end
+
+    %% plot
+    H=get(0,'ScreenSize'); w=600; h=450; x=H(3)/2-w/2; y=H(4)/2-h/2; 
+    figure;set(gcf,'Position',[x y w h]);
+    plot(time,ratio,'.b','linewidth',2,'Markersize',10);hold on
+    plot(time,repmat(3,j,1),'.m','linewidth',2,'Markersize',10);hold on
+    plot(time,ratio,':','linewidth',1,'color',[0.5,0.5,0.5]);
+    grid on ;set(gca,'GridLineStyle',':','GridColor','k','GridAlpha',0.5);
+    xlabel('GPS Time (s)'),ylabel('Ratio test value');
+    axis([time(1) time(end) -100 max(ratio)+100 ]);
+    legend('ratio test value','ratio test threshold (3.0)');
+
+    idx1=find(ratio>=3.0&stat==1);
+    n_fix=size(idx1,1); fix_rate=n_fix/n_all;
+    n_other=size(ratio,1)-n_fix; other_rate=n_other/n_all;
+    n_none=abs(n_all-n_fix-n_other);
+    none_rate=abs(1-fix_rate-other_rate);
+    str1=[sprintf('Fix:%d (%.2f',n_fix,fix_rate*100),'%)'];
+    str2=[sprintf('Other:%d (%.2f',n_other,other_rate*100),'%)'];
+    str3=[sprintf('None:%d (%.2f',n_none,none_rate*100),'%)'];
+    str=[str1,'  ',str2,'  ',str3];
+    text(time(1)+(time(end)-time(1))*0.1,-50,str);
+
+    return
+
     """
     dummy_m_path = "test_script.m"
     

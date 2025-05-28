@@ -5,6 +5,9 @@
 
 import json
 from dataclasses import dataclass
+from pickle import TRUE
+from re import T
+from typing import List, Set, Union, Tuple, Dict, Any
 
 from graphrag.index.typing.error_handler import ErrorHandlerFn
 from graphrag.index.utils.tokens import num_tokens_from_string
@@ -15,6 +18,10 @@ from graphrag.prompts.index.summarize_descriptions import SUMMARIZE_PROMPT
 ENTITY_NAME_KEY = "entity_name"
 DESCRIPTION_LIST_KEY = "description_list"
 MAX_LENGTH_KEY = "max_length"
+
+# Constants for code detection
+CODE_ENTITY_KEYS = ['variable_name', 'function_name', 'script_name']
+CODE_EDGE_KEYS = ['defines_function', 'has_parameter', 'declares_variable', 'uses_parameter', 'assigns_output', 'uses_variable']
 
 
 @dataclass
@@ -70,6 +77,49 @@ class SummarizeExtractor:
             description=result or "",
         )
 
+    def _is_code_description(self, description: str) -> bool:
+        """Check if a description is likely from code analysis.
+        
+        Args:
+            description: The description text to check
+            
+        Returns:
+            bool: True if the description appears to be from code analysis
+        """
+        try:
+            # Try to parse as JSON first
+            data = json.loads(description)
+            
+            # Check for required keys that indicate code entity
+            if isinstance(data, dict):
+                # Check for entity type
+                has_entity_type = False
+                if any([key in CODE_ENTITY_KEYS for key in data]):
+                    has_entity_type = True
+                
+                # Check for edge label if present
+                has_valid_edge = False
+                if 'label' in data:
+                    has_valid_edge = any([key in CODE_EDGE_KEYS for key in data['label']])
+                
+                return has_entity_type or has_valid_edge
+            
+        except (json.JSONDecodeError, TypeError):
+            # If not valid JSON, fall back to string search
+            has_entity_type = any(
+                f'{entity_type}' in description 
+                for entity_type in CODE_ENTITY_KEYS
+            )
+            
+            has_valid_edge = any(
+                f'"label": "{edge_label}"' in description
+                for edge_label in CODE_EDGE_KEYS
+            )
+            
+            return has_entity_type or has_valid_edge
+        
+        return False
+
     async def _summarize_descriptions(
         self, id: str | tuple[str, str], descriptions: list[str]
     ) -> str:
@@ -84,7 +134,15 @@ class SummarizeExtractor:
         if len(descriptions) > 1:
             descriptions = sorted(descriptions)
 
-        # Iterate over descriptions, adding all until the max input tokens is reached
+        # Check if descriptions are from code analysis
+        code_descriptions = [d for d in descriptions if self._is_code_description(d)]
+        code_rate = len(code_descriptions) / len(descriptions) if descriptions else 0
+        
+        # If majority are code descriptions, return them as-is
+        if code_rate > 0.5:
+            return "\n".join(descriptions)
+
+        # Original summarization logic for non-code descriptions
         usable_tokens = self._max_input_tokens - num_tokens_from_string(
             self._summarization_prompt
         )
