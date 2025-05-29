@@ -3,7 +3,10 @@
 
 """A module containing run_workflow method definition."""
 
+import logging
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 import graphrag.data_model.schemas as schemas
 from graphrag.cache.pipeline_cache import PipelineCache
@@ -83,9 +86,30 @@ async def create_community_reports(
     summarization_strategy: dict,
     async_mode: AsyncType = AsyncType.AsyncIO,
     num_threads: int = 4,
+    max_communities_to_process: int | None = 5,  # Added parameter to limit communities
 ) -> pd.DataFrame:
     """All the steps to transform community reports."""
-    nodes = explode_communities(communities, entities)
+    # Filter communities if max_communities_to_process is set
+    if max_communities_to_process is not None and len(communities) > max_communities_to_process:
+        # Assuming 'log' is available (e.g., import logging; log = logging.getLogger(__name__))
+        # And 'pd' for pandas (e.g., import pandas as pd)
+        log.info(f"Limiting community report generation to the first {max_communities_to_process} communities out of {len(communities)}.")
+        # For simplicity, taking the head. If a 'size' column exists and is relevant for prioritization,
+        # consider: communities_df_subset = communities.nlargest(max_communities_to_process, "size").copy()
+        communities_df_subset = communities.head(max_communities_to_process).copy()
+    else:
+        communities_df_subset = communities.copy()
+
+    if communities_df_subset.empty:
+        log.warning("No communities to process after filtering. Returning empty DataFrame for reports.")
+        return pd.DataFrame() # Consider returning with a specific schema if known
+
+    # Explode only the subset of communities
+    nodes = explode_communities(communities_df_subset, entities)
+
+    if nodes.empty:
+        log.warning(f"No nodes found after exploding {len(communities_df_subset)} selected communities. Returning empty DataFrame for reports.")
+        return pd.DataFrame()
 
     nodes = _prep_nodes(nodes)
     edges = _prep_edges(edges_input)
@@ -109,9 +133,9 @@ async def create_community_reports(
     )
 
     community_reports = await summarize_communities(
-        nodes,
-        communities,
-        local_contexts,
+        nodes,  # Already based on filtered communities
+        communities_df_subset,  # Pass the filtered communities DataFrame
+        local_contexts, # local_contexts are built from the filtered 'nodes'
         build_level_context,
         callbacks,
         cache,
@@ -121,7 +145,7 @@ async def create_community_reports(
         num_threads=num_threads,
     )
 
-    return finalize_community_reports(community_reports, communities)
+    return finalize_community_reports(community_reports, communities_df_subset)  # Use filtered communities here as well
 
 
 def _prep_nodes(input: pd.DataFrame) -> pd.DataFrame:

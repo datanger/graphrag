@@ -71,9 +71,6 @@ async def _run_extractor(
         if report is None:
             log.warning("No report found for community: %s", community)
             return None
-        print(input)
-        print("report: ", report)
-        raise
         return CommunityReport(
             community=community,
             full_content=results.output,
