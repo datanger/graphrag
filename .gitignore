@@ -60,3 +60,7 @@ docsite/
 # GraphRAG
 output/
 workspace/
+
+.graphrag
+logs
+
