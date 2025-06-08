@@ -11,6 +11,14 @@ import asyncio
 from contextlib import asynccontextmanager
 import argparse
 
+import sys
+from pathlib import Path
+
+# 将项目根目录添加到 Python 路径
+project_root = str(Path(__file__).parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 # Import from the same directory
 from scripts.graphrag_server import (
     SearchRequest, 

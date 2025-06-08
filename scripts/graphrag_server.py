@@ -62,12 +62,12 @@ async def add_custom_serializer(request, call_next):
     return response
 
 # 配置管理
-def load_config(config_path: str = None) -> GraphRagConfig:
+def load_config(config_path: str) -> GraphRagConfig:
     if config_path is None:
         config_path = os.getenv("GRAPHRAG_CONFIG_PATH", "settings.yaml")
     else:
         os.environ["GRAPHRAG_CONFIG_PATH"] = config_path
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding='utf-8') as f:
         config_data = yaml.safe_load(f)
     return create_graphrag_config(values=config_data)
 
@@ -96,7 +96,7 @@ class PromptTuneRequest(BaseModel):
     k: int = 15
 
 # 数据加载
-def load_data(config: GraphRagConfig) -> Dict[str, pd.DataFrame]:
+def load_data(config: GraphRagConfig) -> Dict[str, Optional[pd.DataFrame]]:
     root_dir = config.root_dir
     try:
         return {
@@ -115,11 +115,14 @@ def load_data(config: GraphRagConfig) -> Dict[str, pd.DataFrame]:
 async def local_search_api(request: SearchRequest):
     try:
         data = load_data(config)
+        if data["entities"] is None:
+            raise HTTPException(status_code=500, detail="Failed to load entities data")
+            
         response, context = await local_search(
             config=config,
             **data,
-            community_level=request.community_level,
-            response_type=request.response_type,
+            community_level=request.community_level if request.community_level is not None else 1,
+            response_type=request.response_type if request.response_type is not None else "json",
             query=request.query
         )
         print(response)
@@ -133,27 +136,42 @@ async def local_search_api(request: SearchRequest):
 async def global_search_api(request: SearchRequest):
     try:
         data = load_data(config)
+        
+        # Check if required data is missing
+        if data["entities"] is None:
+            raise HTTPException(status_code=400, detail="Entities data is missing. Please ensure the data is properly indexed.")
+        if data["communities"] is None:
+            raise HTTPException(status_code=400, detail="Communities data is missing. Please ensure the data is properly indexed.")
+        if data["community_reports"] is None:
+            raise HTTPException(status_code=400, detail="Community reports data is missing. Please ensure the data is properly indexed.")
+            
         response, context = await global_search(
             config=config,
-            **data,
-            community_level=request.community_level,
+            entities=data["entities"],
+            communities=data["communities"],
+            community_reports=data["community_reports"],
+            community_level=request.community_level if request.community_level is not None else 1,
             dynamic_community_selection=True,
-            response_type=request.response_type,
+            response_type=request.response_type if request.response_type is not None else "json",
             query=request.query
         )
         return JSONResponse(content={"response": response, "context": context})
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"全局搜索失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Global search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred during global search: {str(e)}")
 
 @app.post("/graphrag/drift_search")
 async def drift_search_api(request: SearchRequest):
     try:
         data = load_data(config)
+        # Ensure community_level is an integer, defaulting to 1 if None
+        community_level = request.community_level if request.community_level is not None else 1
         response, context = await drift_search(
             config=config,
             **data,
-            community_level=request.community_level,
+            community_level=community_level,
             response_type=request.response_type,
             query=request.query
         )
@@ -226,7 +244,7 @@ async def local_search_streaming_api(request: SearchRequest):
             async for response in local_search_streaming(
                 config=config,
                 **data,
-                community_level=request.community_level,
+                community_level=request.community_level if request.community_level is not None else 1,
                 response_type=request.response_type,
                 query=request.query
             ):

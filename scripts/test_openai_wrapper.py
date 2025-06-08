@@ -19,7 +19,7 @@ def test_chat_completion():
             model="local_search",  # Will use global_search
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "这个文章的内容是什么"}
+                {"role": "user", "content": "这个项目代码的作用"}
             ],
             temperature=0.7,
             max_tokens=1000
@@ -37,7 +37,7 @@ async def test_streaming():
         stream = client.chat.completions.create(
             model="local_search",  # Will use drift_search
             messages=[
-                {"role": "user", "content": "这个文章的内容是什么"}
+                {"role": "user", "content": "这个项目代码的作用"}
             ],
             stream=True
         )

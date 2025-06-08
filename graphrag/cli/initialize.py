@@ -54,7 +54,7 @@ def initialize_project_at(path: Path, force: bool) -> None:
     if not root.exists():
         root.mkdir(parents=True, exist_ok=True)
 
-    settings_yaml = root / "settings.yaml"
+    settings_yaml = root/ ".graphrag" /"settings.yaml"
     if settings_yaml.exists() and not force:
         msg = f"Project already initialized at {root}"
         raise ValueError(msg)
@@ -62,12 +62,12 @@ def initialize_project_at(path: Path, force: bool) -> None:
     with settings_yaml.open("wb") as file:
         file.write(INIT_YAML.encode(encoding="utf-8", errors="strict"))
 
-    dotenv = root / ".env"
+    dotenv = root/ ".graphrag" /".env"
     if not dotenv.exists() or force:
         with dotenv.open("wb") as file:
             file.write(INIT_DOTENV.encode(encoding="utf-8", errors="strict"))
 
-    prompts_dir = root / "prompts"
+    prompts_dir = root/ ".graphrag" /"prompts"
     if not prompts_dir.exists():
         prompts_dir.mkdir(parents=True, exist_ok=True)
 
