@@ -125,8 +125,8 @@ async def local_search_api(request: SearchRequest):
             response_type=request.response_type if request.response_type is not None else "json",
             query=request.query
         )
-        print(response)
-        # print(context)
+        print("response:", response)
+        print(context)
         return JSONResponse(content={"response": response})
     except Exception as e:
         logger.error(f"本地搜索失败: {str(e)}")

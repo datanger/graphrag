@@ -242,7 +242,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
                     }
                     response_data = f"data: {json.dumps(chunk_data)}\n\n"
                     yield response_data
-                    await asyncio.sleep(0.02)  # Small delay to prevent overwhelming the client
+                    # await asyncio.sleep(0.02)  # Small delay to prevent overwhelming the client
                 
                 # Send done signal
                 yield "data: [DONE]\n\n"
