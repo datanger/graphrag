@@ -30,6 +30,8 @@ packages = [{ include = "graphrag" }]
 
 [tool.poetry.scripts]
 graphrag = "graphrag.cli.main:app"
+graphrag-mcp = "scripts.run_mcp_server:main"
+graphrag-mcp-test = "scripts.test_mcp_server:main"
 
 [tool.poetry-dynamic-versioning]
 enable = true
@@ -73,6 +75,9 @@ umap-learn = "^0.5.6"
 # Configuration
 pyyaml = "^6.0.2"
 python-dotenv = "^1.0.1"
+
+# MCP (Model Context Protocol)
+mcp = "^1.0.0"
 
 pydantic = "^2.10.3"
 rich = "^13.9.4"

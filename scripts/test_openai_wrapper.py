@@ -9,8 +9,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 配置信息
-API_BASE_URL = "http://localhost:8001/v1"  # FastAPI服务地址
-TEST_MODEL = "DeepSeek-V3-W8A8"
+API_BASE_URL = "http://localhost:8000/v1"  # FastAPI服务地址
+TEST_MODEL = "local_search"
+# API_BASE_URL = "http://localhost:8001/v1"  # FastAPI服务地址
+# TEST_MODEL = "DeepSeek-V3-W8A8"
 
 # 设置虚拟的API密钥以满足OpenAI客户端要求
 os.environ["OPENAI_API_KEY"] = "dummy-key"
