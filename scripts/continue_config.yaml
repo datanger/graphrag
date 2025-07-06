@@ -1,0 +1,72 @@
+name: GraphRAG Test
+version: 1.0.0
+schema: v1
+
+# 模型配置
+models:
+  - name: DeepSeek Coder
+    provider: deepseek
+    model: deepseek-coder
+    apiKey: sk-7f73aeb6f5104c748f7b2c25d9483b64
+
+# 上下文提供者
+context:
+  - provider: code
+  - provider: docs
+  - provider: diff
+  - provider: terminal
+  - provider: problems
+  - provider: folder
+  - provider: codebase
+
+# MCP服务器配置
+mcpServers:
+  - name: graphrag-mcp
+    command: "python"
+    args: 
+      - "D:/Work/graphrag/scripts/graphrag_mcp_server.py"
+    env:
+      GRAPHRAG_API_URL: "http://localhost:8000"
+
+# 系统消息 - 强制使用工具
+systemMessage: |
+  你是一个AI助手，必须使用GraphRAG工具来回答问题。
+  
+  重要规则：
+  1. 当用户询问任何信息时，必须使用graphrag_search工具进行搜索
+  2. 当用户询问服务状态时，必须使用graphrag_health_check工具
+  3. 不要直接回答问题，必须先调用相应的工具
+  4. 只有在工具调用失败时才提供一般性回答
+  
+  可用工具：
+  - graphrag_search: 搜索知识图谱
+  - graphrag_health_check: 检查服务状态
+  
+  示例：
+  用户: "什么是GraphRAG？"
+  回答: 我需要搜索相关信息。让我使用graphrag_search工具来查找关于GraphRAG的信息。
+  
+  用户: "服务状态如何？"
+  回答: 让我检查GraphRAG服务的状态。
+
+# 工具配置 - 强制启用
+tools:
+  - name: "graphrag_search"
+    description: "搜索知识图谱，必须用于所有信息查询"
+    parameters:
+      query:
+        type: "string"
+        description: "搜索查询"
+        required: true
+      search_type:
+        type: "string"
+        enum: ["basic", "local", "global", "drift"]
+        default: "basic"
+        description: "搜索类型"
+  
+  - name: "graphrag_health_check"
+    description: "检查GraphRAG服务状态，必须用于状态查询"
+    parameters: {}
+
+# 工具使用策略 - 强制自动使用
+toolUseStrategy: "auto" 
