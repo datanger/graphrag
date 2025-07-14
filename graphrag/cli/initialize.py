@@ -57,10 +57,10 @@ def initialize_project_at(path: Path, force: bool) -> None:
     settings_yaml = root/ ".graphrag" /"settings.yaml"
     if settings_yaml.exists() and not force:
         msg = f"Project already initialized at {root}"
-        raise ValueError(msg)
-
-    with settings_yaml.open("wb") as file:
-        file.write(INIT_YAML.encode(encoding="utf-8", errors="strict"))
+        # raise ValueError(msg)
+    else:
+        with settings_yaml.open("wb") as file:
+            file.write(INIT_YAML.encode(encoding="utf-8", errors="strict"))
 
     dotenv = root/ ".graphrag" /".env"
     if not dotenv.exists() or force:
